@@ -1,82 +1,107 @@
-require('dotenv').config();
-const express = require('express')
-    , bodyParser = require('body-parser')
-    , session = require('express-session')
-    , passport = require('passport')
-    , Auth0Strategy = require('passport-auth0')
-    , massive = require('massive')
-    ;
+var http = require('http');
+var path = require('path');
+
+var express = require('express');
+const axios = require('axios');
+const massive = require('massive');
+
+// initialize the express application
+var express = require("express");
+var session = require("express-session");
+var process = require("process");
+var router = express();
+
+var CLIENT_ID = '22CFSG';
+var CLIENT_SECRET = 'ffb7405c22f3c71b44ddf53c408f093d';
+var SESSION_SECRET = 'ytrhcyftrtrsedthrdyu';
+var CALLBACK_URL = 'http://localhost:8080/callback';
 
 
-const app = express();
-app.use(bodyParser.json());
-app.use(session({
-    secret: process.env.SECRET,
-    resave: false,
-    saveUninitialized: true
-}))
-app.use(passport.initialize());
-app.use(passport.session());
+// initialize the Fitbit API client
+var FitbitApiClient = require("fitbit-node");
+var client = new FitbitApiClient(CLIENT_ID, CLIENT_SECRET);
 
-massive(process.env.CONNECTION_STRING).then( (db) => {
+// Use the session middleware
+
+massive('postgres://ahqvwbzkaxiylb:2483305b5edb7da64f1e4dbc63dc98c91cc70c6998d3fbb9fbb78e98206a608e@ec2-54-163-249-237.compute-1.amazonaws.com:5432/d8dl2c3o4vsdt?ssl=true').then( (db) => {
     console.log('Connected to Heroku')
-    app.set('db', db);
+    router.set('db', db);
 })
 
-passport.use( new Auth0Strategy({
-    domain: process.env.AUTH_DOMAIN, 
-    clientID: process.env.AUTH_CLIENTID,
-    clientSecret: process.env.AUTH_CLIENT_SECRET,
-    callbackURL: process.env.AUTH_CALLBACK
-}, (accessToken, refreshToken, extraParams, profile, done) => {
+
+router.use(session({
+     secret: SESSION_SECRET, 
+     cookie: { maxAge: 60000 },
+     resave: false,
+     saveUninitialized: true
+    }));
+
+// redirect the user to the Fitbit authorization page
+router.get("/authorize", function (req, res) {
+    // request access to the user's activity, heartrate, location, nutrion, profile, settings, sleep, social, and weight scopes
+    res.redirect(client.getAuthorizeUrl('activity heartrate location nutrition profile settings sleep social weight',CALLBACK_URL));
+});
+
+// handle the callback from the Fitbit authorization flow
+router.get("/callback", function (req, res) {
+    // exchange the authorization code we just received for an access token
+    client.getAccessToken(req.query.code, CALLBACK_URL).then(function (result) {
+        axios.get('https://api.fitbit.com/1/user/-/profile.json', {headers: {Authorization: `Bearer ${result.access_token}`}})
+            .then( profileData => {
+                console.log('/********************/', profileData)
+                const db = router.get('db');
+
+                db.find_user([result.access_token])
+                    .then(user => {
+                        if(!user[0]){
+                            db.create_user([
+                                profileData.data.user.firstName,
+                                profileData.data.user.lastName,
+                                profileData.data.user.avatar640,
+                                profileData.data.user.encodedId,
+                                profileData.data.user.height,                                
+                                profileData.data.user.weight,                                
+                                profileData.data.user.dateOfBirth,                                
+                                profileData.data.user.gender,                                
+                                profileData.data.user.timezone,
+                                result.access_token                                
+                            ])
+                        }
+                    })
+            })
+            .catch(error => console.log('error: ', error))
+
+        // use the access token to fetch the user's profile information
+        req.session.authorized = true;
+        req.session.access_token = result.access_token;
+        req.session.save();
+        res.redirect("http://localhost:3000/success");
+    }).catch(function (error) {
+        res.send(error);
+    });
+});
+
+router.get("/logout", function(req, res) {
     
-    const db = app.get('db');
-    const userData = profile._json;
-    
-    db.find_user([userData.identities[0].user_id])
-        .then(user => {
-            if(user[0]){
-                return done(null, user[0].id);
-            } else {
-                db.create_user([
-                    userData.firstName,
-                    userData.lastName,
-                    userData.email,
-                    userData.picture,
-                    userData.identities[0].user_id
-                ]).then ( user => {
-                    return done(null, user[0].id);
-                })
-            }
-        })
-}))
-passport.serializeUser( (id, done) => {
-    done(null, id);
-})
-passport.deserializeUser( (id, done) => {
-    app.get('db').find_session_user([id])
-        .then( user => {
-            done(null, user[0])
-        })
+    req.session.authorized = false;
+    req.session.access_token = null;
+    req.session.save();
+    res.redirect("/");  
 })
 
-app.get('/auth', passport.authenticate('auth0'));
-app.get('/auth/callback', passport.authenticate('auth0', {
-    successRedirect: 'http://localhost:3000/',
-    failureRedirect: '/auth'
-}));
-app.get('/auth/me', (req, res) => {
-    if(req.user){
-        return res.status(200).send(req.user);
+router.get('/profile.json', function(req, res) {
+    if (req.session.authorized) {
+        client.get("/profile.json", req.session.access_token).then(function (results) {
+            res.json(results[0]);
+            return res.status(200).send(results)
+        });
     } else {
-        return res.status(401).send('Please login');
+        res.status(403);
+        res.json({ errors: [{ message: 'not authorized' }]});
     }
-})
-app.get('/logout', (req, res) => {
-    req.logout();
-    res.redirect(308, 'http://localhost:3000/')
-})
+});
 
 
+// launch the server
 const PORT = 8080;
-app.listen(PORT, () => console.log(`Listening on port: ${PORT}`));
+router.listen(PORT, () => console.log(`Listening on port: ${PORT}`));

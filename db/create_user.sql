@@ -1,2 +1,2 @@
-insert into users (user_first_name, user_last_name, email, img, auth_id) values ($1, $2, $3, $4, $5)
+insert into users (user_first_name, user_last_name, img, auth_id, user_height, user_weight, date_of_birth, gender, time_zone, access_token) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 returning *;
